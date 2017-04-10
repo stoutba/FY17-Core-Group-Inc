@@ -1,0 +1,130 @@
+--DK16640 External Data Request Core Group, Inc. File 3 of 4: Individual Donor and Alumni Demographic Data
+
+USE OSUF_RE_DW
+
+/*==============================================================================================================================
+--Population per CGI:
+--Include information for all individual donors and all alumni.
+--We do not need information on individuals who are non-alulmni non-donors, but it is OK to send it if it is easier on your end.
+----Specified details: --https://osugiving-my.sharepoint.com/personal/ccampbell_osugiving_com/_layouts/15/guestaccess.aspx?guestaccesstoken=08hEMIUilNpQ6D6V1PjHki8WHfMjWzOC7ltgwHehbQY%3d&docid=2_13e504a909cad426998f861ba2a6109cb&rev=1
+==============================================================================================================================*/
+
+
+SELECT
+  C.ConstituentID AS DonorID
+, PC.[ConstituentCode] AS SourceType	          --Field that identifies primary source type (e.g. alumni, parents, friend, trustee, etc.)
+, COALESCE(C.[State], '') AS StateCode		      --US State (blank for non-US). Acceptable to send state/province codes for Canada and other countries; we will just ignore them.
+, COALESCE(C.PostCode, '') AS 'Zip Code'	      --US only. Zip5 or Zip+4 acceptable.
+, COALESCE(C.Country, 'United States') AS Country --Country name or code. Minimum requirement: US and non-US distinction.
+
+	--, ?? AS Status						--/*Key status values of interest: Active, lost, no valid address, deceased, no-solicit. 
+											--Core Group uses active, addressable, solicitable, degreed alumni as the base for participation analyses. 
+											--Include the fields needed to make this determination.*/
+
+, CASE WHEN SolicitCodes.XCode > 0 THEN 'Yes' ELSE 'No' END AS [Do not Contact]
+, CASE WHEN SolicitCodes.SCode > 0 THEN 'Yes' ELSE 'No' END AS [Do not Solicit]
+, CASE WHEN SolicitCodes.MCode > 0 OR C.SendMail = 'No' THEN 'Yes' ELSE 'No' END AS [Do not Mail]
+, CASE WHEN SolicitCodes.ECode > 0 OR C.NoEMail = 'Yes' THEN 'Yes' ELSE 'No' END AS [Do not Email]	
+, C.IsDeceased
+, C.IsInactive
+, CASE 
+        /* Address Omissions */ 
+		WHEN C.NoValidAddress = 'Yes'                                                         THEN 'Yes'
+		WHEN C.SendMail='No'                                                                  THEN 'Yes'             
+		WHEN C.Address1 IS NULL                                                               THEN 'Yes'              
+		WHEN COALESCE(C.Address1, '') = ''                                                    THEN 'Yes'
+		WHEN COALESCE(C.City, '') = ''                                                        THEN 'Yes'
+		WHEN COALESCE(C.State, '') = ''                                                       THEN 'Yes'
+		WHEN COALESCE(C.PostCode, '') = ''                                                    THEN 'Yes'
+		ELSE 'No'
+  END AS [No Valid Address]
+
+FROM 
+  dbo.DIM_Constituent AS C
+
+										--Alumni
+										LEFT OUTER JOIN dbo.OSUF_PrimaryConstituentCode AS PC ON C.ConstituentDimID = PC.ConstituentDimID
+
+										--Donors
+										LEFT OUTER JOIN 
+														(
+															SELECT 
+															  ConstituentDimID
+															
+															FROM 
+															  dbo.DIM_FinancialInformation
+															
+															WHERE 
+															    InformationType = 'Lifetime Comprehensive Giving'
+															AND InformationSource = 'OSU Foundation'
+															AND [Value] > 0
+														) AS CG ON C.ConstituentDimID = CG.ConstituentDimID
+
+										--Solicit Codes
+										LEFT OUTER JOIN
+														(
+															SELECT 
+															  ConstituentDimID
+															, SUM(CASE WHEN Q.AttributeDescription IN ('X - Permanent No Contact', 'X3 - No Contact', 'XF - Permanent No Contact from OSUF', 'XF3 - No Contact from OSUF') THEN 1 ELSE 0 END ) AS XCode
+															, SUM(CASE WHEN Q.AttributeDescription IN ('SF - No Solicitation', 'SF1 - No OSUF Solicitation (1yr)', 'XSF - Permanent No Solicitation from OSUF') THEN 1 ELSE 0 END ) AS SCode
+															, SUM(CASE WHEN Q.AttributeDescription IN ('MF - No OSUF Postal Mail') THEN 1 ELSE 0 END ) AS MCode
+															, SUM(CASE WHEN Q.AttributeDescription IN ('EF - No OSUF Email') THEN 1 ELSE 0 END ) AS ECode
+
+															FROM
+																(
+																	SELECT 
+																	  ConstituentDimID
+																	, AttributeDescription
+
+																	FROM
+																	  dbo.DIM_ConstituentAttribute
+
+																	WHERE 
+																		AttributeCategory = 'Solicit Code'
+
+																	UNION
+																	SELECT 
+																	  SPC.ConstituentDimID
+																	, CA.AttributeDescription
+
+																	FROM
+																	  dbo.DIM_ConstituentAttribute AS CA
+																										   INNER JOIN dbo.DIM_Constituent C ON CA.ConstituentDimID = C.ConstituentDimID
+																										   INNER JOIN dbo.DIM_Constituent SPC ON C.SpouseConstituentSystemID = SPC.ConstituentSystemID
+																			
+																	WHERE 
+																		CA.AttributeCategory = 'Solicit Code'
+																	AND SPC.ConstituentID IS NOT NULL
+																) AS Q
+
+															GROUP BY 
+															  Q.ConstituentDimID
+														) AS SolicitCodes ON C.ConstituentDimID = SolicitCodes.ConstituentDimID
+
+WHERE
+	C.ConstituentID IS NOT NULL
+AND C.ConstituentDimID <> -1
+AND 
+	(
+			PC.[ConstituentCode] IN ( 'Alumni', 'Attended', 'Student')
+		 OR CG.ConstituentDimID IS NOT NULL
+	)
+
+--Just incase they fall in the list, remove On Hold, Legacys, and Utility Records
+AND NOT EXISTS (SELECT ConstituentDimID FROM dbo.DIM_ConstituentConstitCode AS V WHERE v.ConstituentCode IN ('On Hold New Record', 'OSUAA Legacy', 'Utility Record') AND C.ConstituentDimID = V.ConstituentDimID)
+
+AND CASE
+
+        /* Standard Constituent Omissions */
+        WHEN C.IsAConstituent = 'No'                                                          THEN 'Exclude'
+		WHEN C.KeyIndicator = 'O'                                                             THEN 'Exclude'
+
+		/* Duplicate, Anonymous, Unkown, and other Record Anomoly Omissions */
+		WHEN C.Address1 LIKE 'Duplicate see #%'                                               THEN 'Exclude'
+		WHEN C.Address1 LIKE 'See Duplicate #%'                                               THEN 'Exclude'
+		WHEN C.Address1 LIKE 'See #%'                                                         THEN 'Exclude'
+		WHEN C.FullName LIKE '%Anon%#%'                                                       THEN 'Exclude'
+		WHEN C.FullName LIKE 'ID%Unknown'                                                     THEN 'Exclude'
+
+		ELSE 'Include'
+	END = 'Include' 

@@ -1,0 +1,111 @@
+--DK16640 External Data Request Core Group, Inc. File 2 of 4: Alumni Education Data
+
+USE OSUF_RE_DW
+
+/*==============================================================================================================================
+--Population per CGI:
+--Include all Alumni - donors and non-donors, living and deceased.
+--Use your local definition of Alumni. It is important to include information that delineates between degreed and non-degreed alumni.
+--(Participation analyses and donor relationship metrics are based on active, addressable, solicitable, degreed alumni.
+----Specified details: --https://osugiving-my.sharepoint.com/personal/ccampbell_osugiving_com/_layouts/15/guestaccess.aspx?guestaccesstoken=08hEMIUilNpQ6D6V1PjHki8WHfMjWzOC7ltgwHehbQY%3d&docid=2_13e504a909cad426998f861ba2a6109cb&rev=1
+==============================================================================================================================*/
+
+;WITH 
+  CTE_Education AS 
+					(
+						SELECT 
+						  Q.ConstituentDimID
+						, Q.DateGraduated
+						, Q.IsPrimary
+						, Q.DegreeType
+						, Q.SchoolName
+						, Q.SchoolType
+
+						FROM
+							(
+				
+								SELECT 
+								  E.ConstituentDimID
+								, E.IsPrimary
+								, E.SchoolName
+								, E.SchoolType
+								--Convert FuzzyDateGraduated into Datetime
+								, CAST(CASE 
+											WHEN LEN(E.FuzzyDateGraduated) = 4 THEN LEFT(E.FuzzyDateGraduated, 4) + '-05-01 00:00:00.000'
+											WHEN LEN(E.FuzzyDateGraduated) = 6 THEN LEFT(E.FuzzyDateGraduated, 4) + '-' + RIGHT(E.FuzzyDateGraduated, 2) + '-01 00:00:00.000' 
+											WHEN LEN(E.FuzzyDateGraduated) = 8 THEN LEFT(E.FuzzyDateGraduated, 4) + '-' + RIGHT(LEFT(E.FuzzyDateGraduated, 6), 2) + '-' + RIGHT(E.FuzzyDateGraduated, 2) + ' 00:00:00.000' 
+											WHEN E.ClassYear IS NOT NULL THEN LEFT(CAST(E.ClassYear AS VARCHAR(6)), 4) + '-05-01 00:00:00.000'
+											WHEN E.KnownName IS NOT NULL THEN LEFT(CAST(E.ClassYear AS VARCHAR(6)), 4) + '-05-01 00:00:00.000'
+										END AS DATETIME) AS  DateGraduated
+
+								, CASE
+										WHEN E.Degree LIKE '%associate%' OR E.Degree LIKE '%bach%'      THEN 'Undergraduate'
+										WHEN E.Degree LIKE '%doc%' OR E.Degree Like '%mast%'            THEN 'Graduate'
+										WHEN E.Degree LIKE 'EDS - %'                                    THEN 'Graduate'
+										WHEN E.Degree LIKE 'CER - %' OR E.Degree LIKE 'CERT - %'        THEN 'Non-Degree'
+										WHEN E.Degree = 'CA - CERTIFICATE OF ACCOMPLISHMENT'            THEN 'Non-Degree'
+										WHEN E.Degree = 'CEE - CERTIFICATE-ENGNRG TECH'                 THEN 'Non-Degree'
+										WHEN E.Degree = 'ATD - ATTENDED/NO DEGREE'                      THEN 'Non-Degree'
+										WHEN COALESCE(DegreeType.DegreeType, '') = 'Associates'         THEN 'Undergraduate'
+										WHEN COALESCE(DegreeType.DegreeType, '') = 'Undergraduate'      THEN 'Undergraduate'
+										WHEN COALESCE(DegreeType.DegreeType, '') = 'Masters (also EDS)' THEN 'Graduate'
+										WHEN COALESCE(DegreeType.DegreeType, '') = 'Certificate'        THEN 'Non-Degree'
+										WHEN E.Degree = 'UCRT - UNDERGRAD CERTIFICATE'                  THEN 'Non-Degree' --Verfified with Catherine on this one
+										WHEN E.SchoolType = 'Graduate College'                          THEN 'Graduate'
+										WHEN E.Degree = 'GCRT - GRADUATE CERTIFICATE'                   THEN 'Graduate'
+										WHEN E.Degree IS NULL                                           THEN 'Non-Degree'
+										WHEN E.Degree = 'NDU - NON-DEGREE SEEKING'                      THEN 'Non-Degree'
+										WHEN E.Degree = 'U - UNKNOWN'                                   THEN 'Non-Degree'
+										WHEN E.Degree = 'HD - HONORARY DEGREE'                          THEN 'Honorary'
+										WHEN E.Degree = 'INT - DIETETIC INTERN'                         THEN 'Non-Degree' --Verfified with Catherine on this one. This is something differenct all together
+										WHEN E.Degree = 'DD - DIPLOMA'                                  THEN 'Non-Degree'     --Verfified with Catherine on this one
+										ELSE 'Unknown'
+									END AS DegreeType
+
+								FROM 
+									dbo.DIM_ConstituentEducation E 
+																	INNER JOIN dbo.DIM_Constituent C ON E.ConstituentDimID = C.ConstituentDimID
+												 
+																	LEFT OUTER JOIN
+																					(
+																						SELECT
+																						  ConstituentEducationDimID
+																						, ConstituentDimID
+																						, AttributeDescription AS DegreeType
+
+																						FROM
+																							dbo.DIM_ConstituentEducationAttribute
+
+																						WHERE
+																							AttributeCategory = 'Degree Type'
+																						AND COALESCE(AttributeDescription, '') <> ''
+																					) AS DegreeType ON E.ConstituentDimID = DegreeType.ConstituentDimID AND E.ConstituentEducationDimID = DegreeType.ConstituentEducationDimID
+								WHERE 
+									E.SchoolName IN 
+													(
+													      'Oklahoma State University'
+														, 'OSU-Oklahoma City'
+														, 'OSU-Center for Health Sciences'
+														, 'OSU-Institute of Technology'
+													)
+							) AS Q	
+					) --END CTE_Education CTE
+
+SELECT
+  C.ConstituentID AS DonorID
+, COALESCE(E.DegreeType, '') AS DegreeLevel
+, COALESCE(E.SchoolName, '') AS DegreeSchool
+, COALESCE(E.SchoolType, '') AS DegreeCollege
+, COALESCE (CAST(YEAR(E.DateGraduated) AS VARCHAR(4)), '') AS GradYr
+, C.Gender
+
+FROM 
+  dbo.DIM_Constituent C
+							INNER JOIN dbo.OSUF_PrimaryConstituentCode PCC ON C.ConstituentDimID = PCC.ConstituentDimID
+							LEFT OUTER JOIN CTE_Education E ON C.ConstituentDimID = E.ConstituentDimID
+
+WHERE
+    C.ConstituentID IS NOT NULL
+AND C.ConstituentDimID <> -1
+AND PCC.ConstituentCode IN ( 'Alumni', 'Attended', 'Student')
+AND C.KeyIndicator = 'I'

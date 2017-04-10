@@ -1,0 +1,138 @@
+--DK16640 External Data Request Core Group, Inc. File 4 of 4: Organization Demographic Data
+
+/*==============================================================================================================================
+--Population per CGI:
+--Include all organization donors.
+--Acceptable to send all organizations on file.
+----Specified details: --https://osugiving-my.sharepoint.com/personal/ccampbell_osugiving_com/_layouts/15/guestaccess.aspx?guestaccesstoken=08hEMIUilNpQ6D6V1PjHki8WHfMjWzOC7ltgwHehbQY%3d&docid=2_13e504a909cad426998f861ba2a6109cb&rev=1
+==============================================================================================================================*/
+
+USE OSUF_RE_DW ;
+
+WITH CTE_ConCodes AS 
+					(
+						SELECT 
+						  CCC.ConstituentDimID
+						, CCC.ConstituentCode
+						, ROW_NUMBER() OVER( PARTITION BY CCC.ConstituentDimID ORDER BY CCC.Sequence) AS Seq
+
+						FROM 
+						  [OSUF_RE_DW].dbo.DIM_ConstituentConstitCode AS CCC
+																				LEFT OUTER JOIN
+																								(
+																									SELECT
+																									  ConstituentDimID
+																									, MIN(Sequence) AS minSequence
+
+																									FROM
+																									  [OSUF_RE_DW].dbo.DIM_ConstituentConstitCode
+
+																									GROUP BY
+																									  ConstituentDimID
+																								) AS MinSequence ON CCC.ConstituentDimID = MinSequence.ConstituentDimID AND CCC.Sequence = MinSequence.minSequence
+
+						WHERE 
+							MinSequence.ConstituentDimID IS NULL
+					) --END CTE_ConCodes CTE
+
+/*==============================================================================================================================
+
+==============================================================================================================================*/
+
+
+SELECT
+  C.ConstituentID AS DonorID
+, PC.[ConstituentCode] AS SourceType	--Type of organization (corporation, foundation, family foundation, estate, alumni estate, other organization, etc.)
+
+, COALESCE(SecondaryConstituentCode.ConstituentCode, '') AS [Second SourceType]
+, COALESCE(ThirdConstituentCode.ConstituentCode, '')     AS [Third SourceType]
+, COALESCE(FourthConstituentCode.ConstituentCode, '')    AS [Fourth SourceType]
+
+FROM 
+  dbo.DIM_Constituent C
+										LEFT OUTER JOIN dbo.OSUF_PrimaryConstituentCode AS PC ON C.ConstituentDimID = PC.ConstituentDimID
+
+										--Donors
+										LEFT OUTER JOIN 
+														(
+															SELECT 
+															  ConstituentDimID
+															
+															FROM 
+															  dbo.DIM_FinancialInformation
+															
+															WHERE 
+															    InformationType = 'Lifetime Comprehensive Giving'
+															AND InformationSource = 'OSU Foundation'
+															AND [Value] > 0
+														) AS CG ON C.ConstituentDimID = CG.ConstituentDimID
+
+
+
+
+										LEFT OUTER JOIN
+														(
+															SELECT 
+															  ConstituentDimID
+															, ConstituentCode
+
+															FROM 
+															  CTE_ConCodes
+
+															WHERE 						
+																Seq = 1
+														) AS SecondaryConstituentCode ON C.ConstituentDimID = SecondaryConstituentCode.ConstituentDimID
+
+
+										LEFT OUTER JOIN
+														(
+															SELECT 
+															  ConstituentDimID
+															, ConstituentCode
+
+															FROM 
+															  CTE_ConCodes
+
+															WHERE 						
+																Seq = 2
+														) AS ThirdConstituentCode ON C.ConstituentDimID = ThirdConstituentCode.ConstituentDimID
+																	
+
+										LEFT OUTER JOIN
+														(
+															SELECT 
+															  ConstituentDimID
+															, ConstituentCode
+
+															FROM 
+															  CTE_ConCodes
+
+															WHERE 						
+																Seq = 3
+														) AS FourthConstituentCode ON C.ConstituentDimID = FourthConstituentCode.ConstituentDimID
+
+WHERE
+	C.ConstituentID IS NOT NULL
+AND C.ConstituentDimID <> -1
+AND CG.ConstituentDimID IS NOT NULL
+AND C.KeyIndicator = 'O'
+
+--Just incase they fall in the list, remove On Hold, and Utility Records
+AND NOT EXISTS (SELECT ConstituentDimID FROM dbo.DIM_ConstituentConstitCode AS V WHERE v.ConstituentCode IN ('On Hold New Record', 'Utility Record') AND C.ConstituentDimID = V.ConstituentDimID)
+
+AND CASE
+
+        /* Standard Constituent Omissions */
+        WHEN C.IsAConstituent = 'No'                                                          THEN 'Exclude'
+        WHEN C.IsDeceased = 'Yes'                                                             THEN 'Exclude'
+        WHEN C.IsInactive = 'Yes'                                                             THEN 'Exclude'
+
+		/* Duplicate, Anonymous, Unkown, and other Record Anomoly Omissions */
+		WHEN C.Address1 LIKE 'Duplicate see #%'                                               THEN 'Exclude'
+		WHEN C.Address1 LIKE 'See Duplicate #%'                                               THEN 'Exclude'
+		WHEN C.Address1 LIKE 'See #%'                                                         THEN 'Exclude'
+		WHEN C.FullName LIKE '%Anon%#%'                                                       THEN 'Exclude'
+		WHEN C.FullName LIKE 'ID%Unknown'                                                     THEN 'Exclude'
+
+		ELSE 'Include'
+	END = 'Include' 
